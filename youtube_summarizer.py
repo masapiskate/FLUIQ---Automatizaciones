@@ -89,9 +89,21 @@ def fetch_transcript(video_id: str) -> str | None:
     """Download the transcript for *video_id*. Returns plain text or None."""
     try:
         transcript_list = YouTubeTranscriptApi.get_transcript(
-            video_id, languages=["en", "es"]
+            video_id, languages=["es", "es-419", "es-ES", "en"]
         )
         return " ".join(entry["text"] for entry in transcript_list)
+    except (TranscriptsDisabled, NoTranscriptFound):
+        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [warn] Error al obtener transcripcion de {video_id}: {exc}")
+        return None
+
+    # Fallback: grab any available transcript (auto-generated)
+    try:
+        available = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript = next(iter(available))
+        entries = transcript.fetch()
+        return " ".join(entry["text"] for entry in entries)
     except (TranscriptsDisabled, NoTranscriptFound):
         return None
     except Exception as exc:  # noqa: BLE001
