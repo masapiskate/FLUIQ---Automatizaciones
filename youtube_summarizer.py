@@ -5,12 +5,13 @@ and sends an email digest to santicelemin@outlook.com.
 """
 
 import os
+import re
 import smtplib
 import textwrap
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import googleapiclient.discovery
+import requests
 from dotenv import load_dotenv
 from youtube_transcript_api import (
     NoTranscriptFound,
@@ -28,41 +29,47 @@ CHANNEL_HANDLE = "@bencord"
 MAX_VIDEOS = 5
 EMAIL_FROM = "santicelemink@gmail.com"
 EMAIL_TO = "santicelemin@outlook.com"
+YT_API_BASE = "https://www.googleapis.com/youtube/v3"
 
-# Approx word budget per line when wrapping the transcript for summarisation
 TRANSCRIPT_WORD_LIMIT = 1500
 
 
 # ---------------------------------------------------------------------------
-# YouTube helpers
+# YouTube helpers (using requests directly to avoid google-auth issues)
 # ---------------------------------------------------------------------------
 
-def get_channel_id(youtube, handle: str) -> str:
+def get_channel_id(handle: str) -> str:
     """Resolve a channel @handle to its channel ID."""
-    # The forHandle param is the most direct way (v3 API)
-    resp = youtube.channels().list(
-        part="id",
-        forHandle=handle.lstrip("@"),
-    ).execute()
-
-    items = resp.get("items", [])
+    resp = requests.get(
+        f"{YT_API_BASE}/channels",
+        params={"part": "id", "forHandle": handle.lstrip("@"), "key": YOUTUBE_API_KEY},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    items = resp.json().get("items", [])
     if not items:
-        raise ValueError(f"Channel not found for handle: {handle}")
+        raise ValueError(f"Canal no encontrado para el handle: {handle}")
     return items[0]["id"]
 
 
-def get_latest_videos(youtube, channel_id: str, max_results: int = 5) -> list[dict]:
+def get_latest_videos(channel_id: str, max_results: int = 5) -> list[dict]:
     """Return the latest *max_results* videos for *channel_id*."""
-    resp = youtube.search().list(
-        part="id,snippet",
-        channelId=channel_id,
-        order="date",
-        type="video",
-        maxResults=max_results,
-    ).execute()
+    resp = requests.get(
+        f"{YT_API_BASE}/search",
+        params={
+            "part": "id,snippet",
+            "channelId": channel_id,
+            "order": "date",
+            "type": "video",
+            "maxResults": max_results,
+            "key": YOUTUBE_API_KEY,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
 
     videos = []
-    for item in resp.get("items", []):
+    for item in resp.json().get("items", []):
         videos.append(
             {
                 "video_id": item["id"]["videoId"],
@@ -88,7 +95,7 @@ def fetch_transcript(video_id: str) -> str | None:
     except (TranscriptsDisabled, NoTranscriptFound):
         return None
     except Exception as exc:  # noqa: BLE001
-        print(f"  [warn] Could not fetch transcript for {video_id}: {exc}")
+        print(f"  [warn] No se pudo obtener la transcripcion de {video_id}: {exc}")
         return None
 
 
@@ -97,7 +104,6 @@ def fetch_transcript(video_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _score_sentences(sentences: list[str], word_freq: dict[str, int]) -> list[tuple[int, float, str]]:
-    """Score each sentence by the sum of its word frequencies."""
     scored = []
     for idx, sentence in enumerate(sentences):
         words = sentence.lower().split()
@@ -107,26 +113,18 @@ def _score_sentences(sentences: list[str], word_freq: dict[str, int]) -> list[tu
 
 
 def summarize_transcript(text: str, num_sentences: int = 6) -> str:
-    """
-    Produce an extractive summary of *text* using TF-style sentence scoring.
-    Returns up to *num_sentences* sentences ordered as they appear in the source.
-    """
-    # Trim very long transcripts to avoid slow processing
+    """Extractive summary using TF-style sentence scoring."""
     words = text.split()
     if len(words) > TRANSCRIPT_WORD_LIMIT:
         text = " ".join(words[:TRANSCRIPT_WORD_LIMIT])
 
-    # Split into sentences (naive but good enough for transcripts)
-    import re
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.split()) > 4]
 
     if not sentences:
-        return "(No usable transcript content.)"
-
+        return "(Sin contenido utilizable en la transcripcion.)"
     if len(sentences) <= num_sentences:
         return " ".join(sentences)
 
-    # Build word frequency table (ignore very short words)
     word_freq: dict[str, int] = {}
     for sentence in sentences:
         for word in sentence.lower().split():
@@ -136,7 +134,6 @@ def summarize_transcript(text: str, num_sentences: int = 6) -> str:
 
     scored = _score_sentences(sentences, word_freq)
     top = sorted(scored, key=lambda x: x[1], reverse=True)[:num_sentences]
-    # Restore original order
     top_ordered = sorted(top, key=lambda x: x[0])
     return " ".join(s for _, _, s in top_ordered)
 
@@ -146,7 +143,6 @@ def summarize_transcript(text: str, num_sentences: int = 6) -> str:
 # ---------------------------------------------------------------------------
 
 def build_email_body(summaries: list[dict]) -> str:
-    """Compose the plain-text email body from the list of video summaries."""
     lines = [
         "Hola Santi,",
         "",
@@ -158,8 +154,9 @@ def build_email_body(summaries: list[dict]) -> str:
         lines.append(f"   {item['url']}")
         lines.append(f"   Publicado: {item['published_at'][:10]}")
         lines.append("")
-        # Wrap summary text at 80 chars for readability
-        wrapped = textwrap.fill(item["summary"], width=80, initial_indent="   ", subsequent_indent="   ")
+        wrapped = textwrap.fill(
+            item["summary"], width=80, initial_indent="   ", subsequent_indent="   "
+        )
         lines.append(wrapped)
         lines.append("")
         lines.append("-" * 80)
@@ -170,7 +167,6 @@ def build_email_body(summaries: list[dict]) -> str:
 
 
 def send_email(subject: str, body: str) -> None:
-    """Send an email via Gmail SMTP using an App Password."""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
@@ -191,19 +187,12 @@ def send_email(subject: str, body: str) -> None:
 def main() -> None:
     print("Iniciando YouTube Transcript Summarizer...")
 
-    # Build YouTube API client
-    youtube = googleapiclient.discovery.build(
-        "youtube", "v3", developerKey=YOUTUBE_API_KEY
-    )
-
-    # Resolve channel handle -> ID
     print(f"Buscando canal {CHANNEL_HANDLE}...")
-    channel_id = get_channel_id(youtube, CHANNEL_HANDLE)
+    channel_id = get_channel_id(CHANNEL_HANDLE)
     print(f"  Channel ID: {channel_id}")
 
-    # Fetch latest videos
     print(f"Obteniendo los ultimos {MAX_VIDEOS} videos...")
-    videos = get_latest_videos(youtube, channel_id, max_results=MAX_VIDEOS)
+    videos = get_latest_videos(channel_id, max_results=MAX_VIDEOS)
     print(f"  {len(videos)} videos encontrados.")
 
     summaries = []
@@ -221,7 +210,6 @@ def main() -> None:
 
         summaries.append({**video, "summary": summary})
 
-    # Build and send email
     print("\nEnviando email...")
     subject = f"Resumenes de {CHANNEL_HANDLE}: ultimos {len(summaries)} videos"
     body = build_email_body(summaries)
