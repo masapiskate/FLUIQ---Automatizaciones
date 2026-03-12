@@ -87,11 +87,11 @@ def get_latest_videos(channel_id: str, max_results: int = 5) -> list[dict]:
 
 def fetch_transcript(video_id: str) -> str | None:
     """Download the transcript for *video_id*. Returns plain text or None."""
+    api = YouTubeTranscriptApi()
+    # Try preferred languages first
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(
-            video_id, languages=["es", "es-419", "es-ES", "en"]
-        )
-        return " ".join(entry["text"] for entry in transcript_list)
+        fetched = api.fetch(video_id, languages=["es", "es-419", "es-ES", "en"])
+        return " ".join(entry["text"] for entry in fetched)
     except (TranscriptsDisabled, NoTranscriptFound):
         pass
     except Exception as exc:  # noqa: BLE001
@@ -100,10 +100,10 @@ def fetch_transcript(video_id: str) -> str | None:
 
     # Fallback: grab any available transcript (auto-generated)
     try:
-        available = YouTubeTranscriptApi.list_transcripts(video_id)
-        transcript = next(iter(available))
-        entries = transcript.fetch()
-        return " ".join(entry["text"] for entry in entries)
+        transcript_list = api.list(video_id)
+        transcript = next(iter(transcript_list))
+        fetched = transcript.fetch()
+        return " ".join(entry["text"] for entry in fetched)
     except (TranscriptsDisabled, NoTranscriptFound):
         return None
     except Exception as exc:  # noqa: BLE001
