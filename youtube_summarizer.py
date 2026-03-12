@@ -1,16 +1,16 @@
 """
 YouTube Transcript Summarizer
-Fetches the latest 5 videos from @bencord, summarizes transcripts,
-and sends an email digest to santicelemin@outlook.com.
+Fetches the latest 5 videos from @bencord, generates a summary and a
+LinkedIn post for each using Claude AI, and sends an email digest.
 """
 
 import os
-import re
 import smtplib
 import textwrap
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import anthropic
 import requests
 from dotenv import load_dotenv
 from youtube_transcript_api import (
@@ -24,6 +24,7 @@ load_dotenv()
 YOUTUBE_API_KEY = os.environ["YOUTUBE_API_KEY"]
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 CHANNEL_HANDLE = "@bencord"
 MAX_VIDEOS = 5
@@ -31,11 +32,11 @@ EMAIL_FROM = "santicelemink@gmail.com"
 EMAIL_TO = "santicelemin@outlook.com"
 YT_API_BASE = "https://www.googleapis.com/youtube/v3"
 
-TRANSCRIPT_WORD_LIMIT = 1500
+TRANSCRIPT_WORD_LIMIT = 8000
 
 
 # ---------------------------------------------------------------------------
-# YouTube helpers (using requests directly to avoid google-auth issues)
+# YouTube helpers
 # ---------------------------------------------------------------------------
 
 def get_channel_id(handle: str) -> str:
@@ -88,7 +89,6 @@ def get_latest_videos(channel_id: str, max_results: int = 5) -> list[dict]:
 def fetch_transcript(video_id: str) -> str | None:
     """Download the transcript for *video_id*. Returns plain text or None."""
     api = YouTubeTranscriptApi()
-    # Try preferred languages first
     try:
         fetched = api.fetch(video_id, languages=["es", "es-419", "es-ES", "en"])
         return " ".join(entry.text for entry in fetched)
@@ -112,42 +112,64 @@ def fetch_transcript(video_id: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Summarisation (extractive, no external AI API required)
+# AI generation with Claude
 # ---------------------------------------------------------------------------
 
-def _score_sentences(sentences: list[str], word_freq: dict[str, int]) -> list[tuple[int, float, str]]:
-    scored = []
-    for idx, sentence in enumerate(sentences):
-        words = sentence.lower().split()
-        score = sum(word_freq.get(w, 0) for w in words) / max(len(words), 1)
-        scored.append((idx, score, sentence))
-    return scored
+def generate_linkedin_content(title: str, url: str, transcript: str) -> dict:
+    """Use Claude to generate a summary and a LinkedIn post from the transcript."""
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-
-def summarize_transcript(text: str, num_sentences: int = 6) -> str:
-    """Extractive summary using TF-style sentence scoring."""
-    words = text.split()
+    words = transcript.split()
     if len(words) > TRANSCRIPT_WORD_LIMIT:
-        text = " ".join(words[:TRANSCRIPT_WORD_LIMIT])
+        transcript = " ".join(words[:TRANSCRIPT_WORD_LIMIT])
 
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.split()) > 4]
+    prompt = f"""Tenés la transcripción de un video de YouTube titulado: "{title}"
+URL: {url}
 
-    if not sentences:
-        return "(Sin contenido utilizable en la transcripcion.)"
-    if len(sentences) <= num_sentences:
-        return " ".join(sentences)
+TRANSCRIPCIÓN:
+{transcript}
 
-    word_freq: dict[str, int] = {}
-    for sentence in sentences:
-        for word in sentence.lower().split():
-            word = re.sub(r"[^a-z0-9]", "", word)
-            if len(word) > 3:
-                word_freq[word] = word_freq.get(word, 0) + 1
+Tu tarea es generar DOS cosas:
 
-    scored = _score_sentences(sentences, word_freq)
-    top = sorted(scored, key=lambda x: x[1], reverse=True)[:num_sentences]
-    top_ordered = sorted(top, key=lambda x: x[0])
-    return " ".join(s for _, _, s in top_ordered)
+1. RESUMEN: Un resumen claro y conciso (3-5 oraciones) de los puntos principales del video. En español.
+
+2. POST DE LINKEDIN: Un texto atractivo y profesional para publicar en LinkedIn sobre este video. Debe:
+   - Tener un gancho inicial que capture la atención
+   - Resumir el valor o aprendizaje principal del video
+   - Incluir 3-5 puntos clave como bullet points (usando →)
+   - Terminar con una llamada a la acción o reflexión
+   - Incluir hashtags relevantes al final (5-7 hashtags)
+   - Tener un tono cercano, en primera persona como si fuera el creador del contenido
+   - Estar en español
+   - Tener entre 150-250 palabras
+
+Respondé EXACTAMENTE en este formato:
+RESUMEN:
+[tu resumen aquí]
+
+POST LINKEDIN:
+[tu post aquí]"""
+
+    message = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    response_text = message.content[0].text
+
+    summary = ""
+    linkedin_post = ""
+
+    if "RESUMEN:" in response_text and "POST LINKEDIN:" in response_text:
+        parts = response_text.split("POST LINKEDIN:")
+        summary = parts[0].replace("RESUMEN:", "").strip()
+        linkedin_post = parts[1].strip()
+    else:
+        summary = response_text
+        linkedin_post = "(No se pudo generar el post de LinkedIn.)"
+
+    return {"summary": summary, "linkedin_post": linkedin_post}
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +180,7 @@ def build_email_body(summaries: list[dict]) -> str:
     lines = [
         "Hola Santi,",
         "",
-        f"Aqui van los resumenes de los ultimos {len(summaries)} videos del canal {CHANNEL_HANDLE}:",
+        f"Aqui van los resumenes y posts de LinkedIn de los ultimos {len(summaries)} videos del canal {CHANNEL_HANDLE}:",
         "",
     ]
     for i, item in enumerate(summaries, start=1):
@@ -166,13 +188,24 @@ def build_email_body(summaries: list[dict]) -> str:
         lines.append(f"   {item['url']}")
         lines.append(f"   Publicado: {item['published_at'][:10]}")
         lines.append("")
-        wrapped = textwrap.fill(
+
+        lines.append("RESUMEN:")
+        wrapped_summary = textwrap.fill(
             item["summary"], width=80, initial_indent="   ", subsequent_indent="   "
         )
-        lines.append(wrapped)
+        lines.append(wrapped_summary)
         lines.append("")
-        lines.append("-" * 80)
+
+        lines.append("POST PARA LINKEDIN:")
+        lines.append("-" * 40)
+        for line in item["linkedin_post"].splitlines():
+            lines.append(f"   {line}")
+        lines.append("-" * 40)
+
         lines.append("")
+        lines.append("=" * 80)
+        lines.append("")
+
     lines.append("Saludos,")
     lines.append("YouTube Summarizer Bot")
     return "\n".join(lines)
@@ -214,16 +247,19 @@ def main() -> None:
 
         transcript = fetch_transcript(vid_id)
         if transcript:
-            print(f"  Transcripcion obtenida ({len(transcript.split())} palabras). Resumiendo...")
-            summary = summarize_transcript(transcript)
+            print(f"  Transcripcion obtenida ({len(transcript.split())} palabras). Generando contenido con Claude...")
+            content = generate_linkedin_content(video["title"], video["url"], transcript)
+            summary = content["summary"]
+            linkedin_post = content["linkedin_post"]
         else:
             summary = "(Transcripcion no disponible para este video.)"
+            linkedin_post = "(Sin transcripcion, no se puede generar post.)"
             print("  Sin transcripcion.")
 
-        summaries.append({**video, "summary": summary})
+        summaries.append({**video, "summary": summary, "linkedin_post": linkedin_post})
 
     print("\nEnviando email...")
-    subject = f"Resumenes de {CHANNEL_HANDLE}: ultimos {len(summaries)} videos"
+    subject = f"Resumenes + Posts LinkedIn de {CHANNEL_HANDLE}: ultimos {len(summaries)} videos"
     body = build_email_body(summaries)
     send_email(subject, body)
 
