@@ -91,7 +91,7 @@ def fetch_transcript(video_id: str) -> str | None:
     # Try preferred languages first
     try:
         fetched = api.fetch(video_id, languages=["es", "es-419", "es-ES", "en"])
-        return " ".join(entry["text"] for entry in fetched)
+        return " ".join(entry.text for entry in fetched)
     except (TranscriptsDisabled, NoTranscriptFound):
         pass
     except Exception as exc:  # noqa: BLE001
@@ -103,7 +103,7 @@ def fetch_transcript(video_id: str) -> str | None:
         transcript_list = api.list(video_id)
         transcript = next(iter(transcript_list))
         fetched = transcript.fetch()
-        return " ".join(entry["text"] for entry in fetched)
+        return " ".join(entry.text for entry in fetched)
     except (TranscriptsDisabled, NoTranscriptFound):
         return None
     except Exception as exc:  # noqa: BLE001
