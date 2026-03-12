@@ -86,9 +86,13 @@ def get_latest_videos(channel_id: str, max_results: int = 5) -> list[dict]:
 # Transcript helpers
 # ---------------------------------------------------------------------------
 
+COOKIES_FILE = os.path.join(os.path.dirname(__file__), "youtube_cookies.txt")
+
+
 def fetch_transcript(video_id: str) -> str | None:
     """Download the transcript for *video_id*. Returns plain text or None."""
-    api = YouTubeTranscriptApi()
+    cookies_path = COOKIES_FILE if os.path.exists(COOKIES_FILE) else None
+    api = YouTubeTranscriptApi(cookie_path=cookies_path)
     try:
         fetched = api.fetch(video_id, languages=["es", "es-419", "es-ES", "en"])
         return " ".join(entry.text for entry in fetched)
